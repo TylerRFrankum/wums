@@ -1,6 +1,6 @@
 services:
   wums:
-    image: tfrankum/wums:latest  # Changed from "build: ."
+    build: .
     container_name: wums
     environment:
       - DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
