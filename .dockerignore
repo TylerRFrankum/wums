@@ -1,0 +1,11 @@
+data/
+subscriptions.json
+comics.json
+.git
+.gitignore
+README.md
+*.md
+.env
+__pycache__
+*.pyc
+.DS_Store

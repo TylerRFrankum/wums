@@ -1,0 +1,14 @@
+services:
+  wums:
+    build: .
+    container_name: wums
+    environment:
+      - DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+      - DISCORD_CHANNEL_ID=YOUR_CHANNEL_ID_HERE
+      - ADMIN_USER_IDS=YOUR_USER_ID_HERE  # Comma-separated list of admin Discord user IDs
+      - CHECK_INTERVAL=7200  # Check every 2 hours (7200 seconds)
+      - SEND_TEST_NOTIFICATION=true  # Set to false to skip test notification on startup
+      - SEND_STARTUP_RSS_NOTIFICATIONS=false  # Set to true to send notifications for current RSS entries on startup
+    volumes:
+      - ./data:/app/data  # Persistent data storage (comics.json and subscriptions.json)
+    restart: unless-stopped
