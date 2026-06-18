@@ -13,6 +13,7 @@ import feedparser
 import re
 from html import unescape
 from email.utils import parsedate_to_datetime
+from http import HTTPStatus
 
 # Configuration from environment variables
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -200,16 +201,28 @@ def parse_color(color_input):
     except ValueError:
         return None
 
+def format_status_code(code):
+    """Return 'NNN Phrase' for known HTTP codes, 'NNN' for unknown, 'ERR' for None."""
+    if code is None:
+        return "ERR (no response)"
+    try:
+        return f"{code} {HTTPStatus(code).phrase}"
+    except ValueError:
+        return str(code)
+
 # Helper functions
 def get_content_hash(url):
-    """Fetch URL content and return its hash"""
+    """Fetch URL content and return (hash, status_code) tuple. status_code is None on connection error."""
+    status_code = None
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=30, headers=headers)
+        status_code = response.status_code
         response.raise_for_status()
-        return hashlib.sha256(response.text.encode()).hexdigest()
+        return hashlib.sha256(response.text.encode()).hexdigest(), status_code
     except Exception as e:
         print(f"Error fetching URL: {e}")
-        return None
+        return None, status_code
 
 def extract_caption_from_html(html_content):
     """Extract the first meaningful caption/text from HTML content"""
@@ -350,11 +363,15 @@ async def send_rss_update_notification(channel, comic_id, comic, entry):
     except Exception as e:
         print(f"Error sending {comic['name']} update notification: {e}")
 
-async def send_error_notification(channel, comic_name, url, error_message):
+async def send_error_notification(channel, comic_name, url, error_message, recent_status_codes=None):
     """Send error notification to Discord channel"""
+    description = f"There was a problem checking {comic_name}. The site may be rate limiting requests or temporarily unavailable.\n\n**Error details:** {error_message}"
+    if recent_status_codes:
+        codes_str = " → ".join(format_status_code(c) for c in recent_status_codes)
+        description += f"\n\n**Last {len(recent_status_codes)} status codes:** {codes_str}"
     embed = discord.Embed(
         title=f"⚠️ {comic_name} Monitoring Error",
-        description=f"There was a problem checking {comic_name}. The site may be rate limiting requests or temporarily unavailable.\n\n**Error details:** {error_message}",
+        description=description,
         color=0xE74C3C,
         url=url
     )
@@ -657,16 +674,36 @@ async def inspectcomic_command(interaction: discord.Interaction, comic_id: str):
     
     if comic['type'] == 'html':
         # For HTML, just show what we'd monitor
-        current_hash = get_content_hash(comic['url'])
+        current_hash, status_code = get_content_hash(comic['url'])
+
+        recent_codes = getattr(monitor_comics, f'{comic_id}_recent_status_codes', None)
+        recent_codes_str = (" → ".join(format_status_code(c) for c in recent_codes)) if recent_codes else "No data yet (monitor hasn't run)"
+
         if current_hash:
             embed = discord.Embed(
                 title=f"Preview: {comic['name']} (HTML Monitor)",
-                description=f"**Type:** HTML hash comparison\n**URL:** {comic['url']}\n**Current Hash:** `{current_hash[:16]}...`\n\nThis comic is monitored by checking if the HTML content changes. No preview content available.",
+                description=(
+                    f"**Type:** HTML hash comparison\n"
+                    f"**URL:** {comic['url']}\n"
+                    f"**Current Hash:** `{current_hash[:16]}...`\n"
+                    f"**This Request:** {format_status_code(status_code)}\n"
+                    f"**Last 3 Monitor Status Codes:** {recent_codes_str}\n\n"
+                    f"This comic is monitored by checking if the HTML content changes. No preview content available."
+                ),
                 color=int(comic['color'], 16)
             )
             await interaction.edit_original_response(content=None, embed=embed)
         else:
-            await interaction.edit_original_response(content="Failed to fetch the HTML page.")
+            embed = discord.Embed(
+                title=f"⚠️ {comic['name']} — Fetch Failed",
+                description=(
+                    f"**URL:** {comic['url']}\n"
+                    f"**This Request:** {format_status_code(status_code)}\n"
+                    f"**Last 3 Monitor Status Codes:** {recent_codes_str}"
+                ),
+                color=0xE74C3C
+            )
+            await interaction.edit_original_response(content=None, embed=embed)
     
     elif comic['type'] == 'rss':
         # For RSS, fetch and show the latest entry
@@ -731,8 +768,17 @@ async def monitor_comics():
         
         if comic_type == 'html':
             # HTML hash monitoring
-            current_hash = get_content_hash(comic['url'])
-            
+            current_hash, status_code = get_content_hash(comic['url'])
+
+            # Track last 3 status codes across monitor iterations
+            recent_codes_attr = f'{comic_id}_recent_status_codes'
+            if not hasattr(monitor_comics, recent_codes_attr):
+                setattr(monitor_comics, recent_codes_attr, [])
+            recent_codes = getattr(monitor_comics, recent_codes_attr)
+            recent_codes.append(status_code)
+            if len(recent_codes) > 3:
+                recent_codes.pop(0)
+
             if current_hash:
                 # Reset error counter
                 if hasattr(monitor_comics, f'{comic_id}_consecutive_errors'):
@@ -767,9 +813,10 @@ async def monitor_comics():
                         channel,
                         comic['name'],
                         comic['url'],
-                        f"Failed to fetch the website {errors} times in a row."
+                        f"Failed to fetch the website {errors} times in a row.",
+                        recent_status_codes=getattr(monitor_comics, f'{comic_id}_recent_status_codes', None)
                     )
-        
+
         elif comic_type == 'rss':
             # RSS feed monitoring
             entry = get_latest_rss_entry(comic['url'])
